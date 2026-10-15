@@ -1,3 +1,5 @@
+## 2.1
+ - Add protocol FineOffset-WH24 (WH24/WH65)
 ## 2.0
  - Add protocol Bresser-3CH
  - Add protocol BL999

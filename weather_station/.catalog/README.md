@@ -30,3 +30,4 @@ Vauno EN8822C
 Solight TE44
 BL999
 Bresser-3CH
+FineOffset-WH24 (WH24/WH65, receive with an FM preset)
