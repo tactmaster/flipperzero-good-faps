@@ -12,7 +12,8 @@
  *
  * The sensor sends a package every ~16 s, ~11 ms wide.
  * The bits are PCM (NRZ) modulated with Frequency Shift Keying,
- * one bit lasts 58 us. Use one of the FM presets to receive it.
+ * one bit lasts 58 us. The deviation is about +-60 kHz (measured on the
+ * rtl_433_tests WH65B recordings), receive it with the FM476 preset.
  *
  * - Preamble:  aa aa aa aa aa
  * - Sync word: 2d d4
@@ -44,6 +45,8 @@
 #define FINEOFFSET_WH24_BIT_US          58
 #define FINEOFFSET_WH24_BIT_MIN_US      50
 #define FINEOFFSET_WH24_BIT_MAX_US      66
+#define FINEOFFSET_WH24_TE_SCALE        16
+#define FINEOFFSET_WH24_TE_TRACK_BITS   4
 #define FINEOFFSET_WH24_MAX_RUN_BITS    64
 #define FINEOFFSET_WH24_SYNC            0xAA2DD4
 #define FINEOFFSET_WH24_SYNC_MASK       0xFFFFFF
@@ -67,6 +70,8 @@ struct WSProtocolDecoderFineOffsetWh24 {
 
     uint32_t sync_shift;
     bool inverted;
+    uint32_t prev_duration;
+    uint32_t prev_bits;
     uint8_t packet[FINEOFFSET_WH24_PACKET_BYTES];
 };
 
@@ -134,7 +139,8 @@ void ws_protocol_decoder_fineoffset_wh24_reset(void* context) {
     WSProtocolDecoderFineOffsetWh24* instance = context;
     instance->decoder.parser_step = FineOffsetWh24DecoderStepSync;
     instance->decoder.decode_count_bit = 0;
-    instance->decoder.te_last = ws_protocol_fineoffset_wh24_const.te_short;
+    instance->decoder.te_last =
+        ws_protocol_fineoffset_wh24_const.te_short * FINEOFFSET_WH24_TE_SCALE;
     instance->sync_shift = 0;
 }
 
@@ -220,18 +226,32 @@ void ws_protocol_decoder_fineoffset_wh24_feed(void* context, bool level, uint32_
     WSProtocolDecoderFineOffsetWh24* instance = context;
 
     // NRZ: each level lasts a whole number of bit periods.
-    // te_last tracks the measured bit period, the preamble is a run of single bits.
-    uint32_t bits = (duration + instance->decoder.te_last / 2) / instance->decoder.te_last;
+    // te_last tracks the measured bit period in 1/16 us. The receiver stretches one
+    // level and shortens the other by the same amount, so measure the period over
+    // a pair of adjacent runs, where that skew cancels out, and average slowly.
+    uint32_t te = instance->decoder.te_last;
+    uint32_t bits = (duration * FINEOFFSET_WH24_TE_SCALE + te / 2) / te;
 
     if(bits == 0 || bits > FINEOFFSET_WH24_MAX_RUN_BITS) {
         ws_protocol_decoder_fineoffset_wh24_reset(instance);
         return;
     }
 
-    if(bits == 1) {
-        uint32_t te = (instance->decoder.te_last * 3 + duration) / 4;
-        instance->decoder.te_last =
-            CLAMP(te, FINEOFFSET_WH24_BIT_MAX_US, FINEOFFSET_WH24_BIT_MIN_US);
+    if(bits <= FINEOFFSET_WH24_TE_TRACK_BITS && instance->prev_bits) {
+        uint32_t pair_te = (duration + instance->prev_duration) * FINEOFFSET_WH24_TE_SCALE /
+                           (bits + instance->prev_bits);
+        int32_t error = (int32_t)pair_te - (int32_t)te;
+        te += error / 8;
+        instance->decoder.te_last = CLAMP(
+            te,
+            FINEOFFSET_WH24_BIT_MAX_US * FINEOFFSET_WH24_TE_SCALE,
+            FINEOFFSET_WH24_BIT_MIN_US * FINEOFFSET_WH24_TE_SCALE);
+    }
+    if(bits <= FINEOFFSET_WH24_TE_TRACK_BITS) {
+        instance->prev_duration = duration;
+        instance->prev_bits = bits;
+    } else {
+        instance->prev_bits = 0;
     }
 
     for(uint32_t i = 0; i < bits; i++) {
